@@ -1,0 +1,15 @@
+[project]
+name = "omniparser"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "certifi>=2025.8.3",
+    "numpy<2.0",
+    "setuptools>=80.9.0",
+    "torch==2.2.0",
+    "torchvision>=0.17.0",
+    "transformers>=4.45.0,<4.46.0",
+    "ultralytics>=8.3.181",
+]
