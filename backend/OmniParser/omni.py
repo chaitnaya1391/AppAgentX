@@ -15,10 +15,10 @@ import uvicorn
 app = FastAPI()
 
 # 默认设备
-device = 'cuda:0'
+device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 # 初始化模型，只加载一次
-yolo_model_path = 'weights/icon_detect_v1_5/best.pt'
+yolo_model_path = 'weights/icon_detect_v1_5/model_v1_5.pt'
 caption_model_name = 'florence2'
 caption_model_path = 'weights/icon_caption_florence'
 
