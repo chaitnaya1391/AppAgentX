@@ -10,15 +10,22 @@ import base64
 import torch
 import pandas as pd
 import uvicorn
+
 import logging
+from google.cloud import logging as cloud_logging
+from google.cloud.logging_v2.handlers import CloudLoggingHandler
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+# 1. Create a Cloud Logging client.
+client = cloud_logging.Client()
 
+# 2. Set up the Cloud Logging handler.
+# This handler will direct all logs to Google Cloud Logging.
+handler = CloudLoggingHandler(client)
+
+# 3. Create a logger instance and add the handler.
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # Set the minimum log level
+logger.addHandler(handler)
 
 # 初始化 FastAPI
 app = FastAPI()
@@ -29,9 +36,9 @@ device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 logger.info(f"Using device: {device}")
 
 # 初始化模型，只加载一次
-yolo_model_path = 'weights/icon_detect/model.pt'
+yolo_model_path = 'weights/icon_detect_v1_5/model_v1_5.pt'
 caption_model_name = 'florence2'
-caption_model_path = 'weights/icon_caption'
+caption_model_path = 'weights/icon_caption_florence'
 
 som_model = get_yolo_model(model_path=yolo_model_path)
 som_model.to(device)
