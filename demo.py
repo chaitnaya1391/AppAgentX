@@ -114,8 +114,27 @@ def auto_exploration():
         q.put(("\n".join(auto_log_storage), auto_page_storage))
 
     def run_exploration():
-        final_state = run_task(temp_state, callback)
-        final_state_queue.put(final_state)
+        try:
+            auto_log_storage.append(f"Starting exploration with state: tsk='{temp_state.get('tsk', 'NONE')}', device='{temp_state.get('device', 'NONE')}'")
+            final_state = run_task(temp_state, callback)
+            auto_log_storage.append(f"Exploration completed. Final state type: {type(final_state)}")
+            auto_log_storage.append(f"Final state keys: {list(final_state.keys()) if isinstance(final_state, dict) else 'NOT A DICT'}")
+            final_state_queue.put(final_state)
+        except Exception as e:
+            auto_log_storage.append(f"ERROR in run_exploration: {str(e)}")
+            import traceback
+            auto_log_storage.append(f"Traceback: {traceback.format_exc()}")
+            # Put an empty state with error info for debugging
+            error_state = {
+                "tsk": temp_state.get("tsk", "") if temp_state else "",
+                "app_name": "",
+                "step": 0,
+                "history_steps": [],
+                "current_page_screenshot": "",
+                "current_page_json": "",
+                "errors": [{"error": str(e), "traceback": traceback.format_exc()}]
+            }
+            final_state_queue.put(error_state)
 
     # Start the exploration task in a new thread
     t = threading.Thread(target=run_exploration)
@@ -134,11 +153,39 @@ def auto_exploration():
     # Get the final state from the queue
     try:
         final_state = final_state_queue.get(timeout=5)  # Wait for the final state
-        # Convert the result to JSON format and store it
-        state2json_result = state2json(final_state)
-        auto_log_storage.append(state2json_result)
-    except:
-        auto_log_storage.append("Error: Failed to get final state")
+        
+        # Add validation to ensure we have meaningful data before saving
+        if final_state and isinstance(final_state, dict):
+            auto_log_storage.append(f"Final state validation: tsk='{final_state.get('tsk', 'NONE')}', app_name='{final_state.get('app_name', 'NONE')}', step={final_state.get('step', 'NONE')}")
+            auto_log_storage.append(f"Final state screenshot: '{final_state.get('current_page_screenshot', 'NONE')}'")
+            auto_log_storage.append(f"Final state JSON: '{final_state.get('current_page_json', 'NONE')}'")
+            auto_log_storage.append(f"Final state page_history: {len(final_state.get('page_history', []))} items")
+            auto_log_storage.append(f"Final state history_steps: {len(final_state.get('history_steps', []))} items")
+            
+            # Check for errors in the final state
+            if final_state.get("errors"):
+                auto_log_storage.append(f"ERRORS found in final state: {final_state['errors']}")
+            
+            # If we don't have current page data but have page history, use the last page
+            if (not final_state.get("current_page_screenshot") and 
+                final_state.get("page_history") and 
+                len(final_state["page_history"]) > 0):
+                auto_log_storage.append("Warning: Using last page from history as final page data")
+                final_state["current_page_screenshot"] = final_state["page_history"][-1]
+            
+            # Ensure we have basic state information
+            if not final_state.get("tsk"):
+                auto_log_storage.append("Warning: No task information in final state")
+            if not final_state.get("app_name"):
+                auto_log_storage.append("Warning: No app_name in final state")
+                
+            # Convert the result to JSON format and store it
+            state2json_result = state2json(final_state)
+            auto_log_storage.append(f"JSON conversion result: {state2json_result}")
+        else:
+            auto_log_storage.append(f"Error: Final state is empty or invalid. Type: {type(final_state)}, Value: {final_state}")
+    except Exception as e:
+        auto_log_storage.append(f"Error: Failed to get final state - {str(e)}")
 
     yield "\n".join(auto_log_storage), auto_page_storage
 
@@ -392,9 +439,11 @@ with gr.Blocks(
                 global temp_state
                 if temp_state:
                     temp_state["completed"] = True
+                print(temp_state)
                 user_log_storage.append("Session stopped.")
                 user_page_storage.clear()
                 state2json_result = state2json(temp_state)
+                print(state2json_result)
                 user_log_storage.append(state2json_result)
                 return (
                     gr.update(interactive=True),  # Enable start button
@@ -1174,7 +1223,7 @@ with gr.Blocks(
                     )
 
             # Import deployment module
-            from deployment import run_task
+            from deployment import run_task as deployment_run_task
 
             # Refresh device list
             def update_execution_devices():
@@ -1265,7 +1314,7 @@ with gr.Blocks(
                     def run_in_background():
                         try:
                             # Modify run_task function to support callback
-                            original_run_task = run_task
+                            original_run_task = deployment_run_task
 
                             def patched_run_task(task, device):
                                 # Here, we can modify run_task function behavior, adding callback support
@@ -1284,12 +1333,11 @@ with gr.Blocks(
 
                             # Temporarily replace function
                             import deployment
-
                             deployment.run_task = patched_run_task
 
                             # Execute task
                             add_log("Starting task execution process...")
-                            result = run_task(task_description, device)
+                            result = deployment_run_task(task_description, device)
 
                             # Restore original function
                             deployment.run_task = original_run_task
