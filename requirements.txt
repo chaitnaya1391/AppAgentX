@@ -18,3 +18,4 @@ pure-python-adb
 asyncio
 aiohttp
 lxml
+pinecone

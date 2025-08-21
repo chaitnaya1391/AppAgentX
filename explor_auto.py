@@ -1,3 +1,4 @@
+import datetime
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
@@ -39,7 +40,15 @@ def tsk_setting(state: State):
         )
     ]
 
-    state["device_info"] = get_device_size.invoke(state["device"])
+    # Validate device parameter before calling get_device_size
+    device = state.get("device", "emulator-5554")
+    if not isinstance(device, str):
+        print(f"❌ Error in tsk_setting: Device parameter is not a string: {type(device)} - {device}")
+        device = "emulator-5554"
+        print(f"🔄 Using fallback device: {device}")
+        state["device"] = device  # Update state with corrected device
+    
+    state["device_info"] = get_device_size.invoke(device)
 
     # Prepare additional information to pass to the callback function
     callback_info = {
@@ -60,9 +69,16 @@ def page_understand(state: State):
     """
     Understand the current page
     """
+    # Validate device parameter before calling take_screenshot
+    device = state.get("device", "emulator-5554")
+    if not isinstance(device, str):
+        print(f"❌ Error in page_understand: Device parameter is not a string: {type(device)} - {device}")
+        device = "emulator-5554"
+        print(f"🔄 Using fallback device: {device}")
+    
     screen_img = take_screenshot.invoke(
         {
-            "device": state["device"],
+            "device": device,
             "app_name": state["app_name"],
             "step": state["step"],
         }
@@ -110,8 +126,15 @@ def perform_action(state: State):
     labeled_image_path = state.get("current_page_screenshot")
     json_labeled_path = state.get("current_page_json")
     user_intent = state.get("tsk", "No specific task")
-    device = state.get("device", "Unknown device")
+    device = state.get("device", "emulator-5554")
     device_size = state.get("device_info", {})
+    
+    # Validate that device is a string, not a function or other object
+    if not isinstance(device, str):
+        print(f"❌ Error: Device parameter is not a string: {type(device)} - {device}")
+        # Fall back to default device
+        device = "emulator-5554"
+        print(f"🔄 Falling back to default device: {device}")
 
     # Read screenshot file and encode to base64
     with open(labeled_image_path, "rb") as f:

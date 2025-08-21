@@ -10,17 +10,28 @@ import base64
 import torch
 import pandas as pd
 import uvicorn
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+
+logger = logging.getLogger(__name__)
 
 # 初始化 FastAPI
 app = FastAPI()
 
 # 默认设备
+logger.info("Detecting available device")
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+logger.info(f"Using device: {device}")
 
 # 初始化模型，只加载一次
-yolo_model_path = 'weights/icon_detect_v1_5/model_v1_5.pt'
+yolo_model_path = 'weights/icon_detect/model.pt'
 caption_model_name = 'florence2'
-caption_model_path = 'weights/icon_caption_florence'
+caption_model_path = 'weights/icon_caption'
 
 som_model = get_yolo_model(model_path=yolo_model_path)
 som_model.to(device)
@@ -39,6 +50,8 @@ async def process_image(
     imgsz_component: int = Form(640)  # Icon Detect Image Size
 ):
     try:
+        logger.info(f"Processing image {file.filename}")
+        logger.info(f"Using device: {device}")
         
         # 保存上传文件到临时路径
         contents = await file.read()

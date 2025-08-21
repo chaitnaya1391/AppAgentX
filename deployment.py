@@ -159,10 +159,18 @@ def capture_and_parse_screen(state: DeploymentState) -> DeploymentState:
         Updated deployment state
     """
     try:
+        # Validate device parameter before calling take_screenshot
+        device = state.get("device", "emulator-5554")
+        if not isinstance(device, str):
+            print(f"❌ Error in capture_and_parse_screen: Device parameter is not a string: {type(device)} - {device}")
+            device = "emulator-5554"
+            print(f"🔄 Using fallback device: {device}")
+            state["device"] = device  # Update state with corrected device
+        
         # 1. Take screenshot
         screenshot_path = take_screenshot.invoke(
             {
-                "device": state["device"],
+                "device": device,
                 "app_name": "deployment",
                 "step": state["current_step"],
             }
@@ -558,7 +566,13 @@ def execute_element_action(
         bbox = element.get("bbox", [0, 0, 0, 0])
 
         # Get device size and calculate center point
-        device_size = get_device_size.invoke(state["device"])
+        device = state.get("device", "emulator-5554")
+        if not isinstance(device, str):
+            print(f"❌ Error in execute_element_action: Device parameter is not a string: {type(device)} - {device}")
+            device = "emulator-5554"
+            state["device"] = device
+        
+        device_size = get_device_size.invoke(device)
         if isinstance(device_size, str):
             # Default size
             device_size = {"width": 1080, "height": 1920}
@@ -567,7 +581,7 @@ def execute_element_action(
 
         # Prepare action parameters
         action_params = {
-            "device": state["device"],
+            "device": device,  # Use the validated device
             "action": action_type,
             "x": center_x,
             "y": center_y,
@@ -654,7 +668,11 @@ Each step of the operation should move toward completing the user's goal task.""
     # Prepare screen information
     screenshot_path = state["current_page"]["screenshot"]
     elements_json_path = state["current_page"]["elements_json"]
-    device = state["device"]
+    device = state.get("device", "emulator-5554")
+    if not isinstance(device, str):
+        print(f"❌ Error in fallback_to_react: Device parameter is not a string: {type(device)} - {device}")
+        device = "emulator-5554"
+        state["device"] = device
     device_size = get_device_size.invoke(device)
 
     # Load screenshot as base64
@@ -1197,7 +1215,13 @@ def generate_execution_template(
     )
 
     # Get device dimensions
-    device_size = get_device_size.invoke(state["device"])
+    device = state.get("device", "emulator-5554")
+    if not isinstance(device, str):
+        print(f"❌ Error in check_shortcut_associations: Device parameter is not a string: {type(device)} - {device}")
+        device = "emulator-5554"
+        state["device"] = device
+    
+    device_size = get_device_size.invoke(device)
     if isinstance(device_size, str):
         device_size = {"width": 1080, "height": 1920}
 
@@ -1446,7 +1470,12 @@ def execute_high_level_action(
         # Special handling for back operation
         if action_type == "back":
             print("Executing back operation")
-            result = screen_action.invoke({"device": state["device"], "action": "back"})
+            device = state.get("device", "emulator-5554")
+            if not isinstance(device, str):
+                print(f"❌ Error in perform_click_action (back): Device parameter is not a string: {type(device)} - {device}")
+                device = "emulator-5554"
+                state["device"] = device
+            result = screen_action.invoke({"device": device, "action": "back"})
 
             # Record history
             state["history"].append(
@@ -1486,7 +1515,13 @@ def execute_high_level_action(
         bbox = element.get("bbox", [0, 0, 0, 0])
 
         # Get device size and calculate center point
-        device_size = get_device_size.invoke(state["device"])
+        device = state.get("device", "emulator-5554")
+        if not isinstance(device, str):
+            print(f"❌ Error in perform_click_action: Device parameter is not a string: {type(device)} - {device}")
+            device = "emulator-5554"
+            state["device"] = device
+        
+        device_size = get_device_size.invoke(device)
         if isinstance(device_size, str):
             device_size = {"width": 1080, "height": 1920}
 
@@ -1495,7 +1530,7 @@ def execute_high_level_action(
 
         # Prepare operation parameters
         action_params = {
-            "device": state["device"],
+            "device": device,  # Use the validated device
             "action": action_type,
             "x": center_x,
             "y": center_y,
