@@ -121,11 +121,21 @@ async def process_image(image_file: UploadFile) -> torch.Tensor:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"图像处理失败: {str(e)}")
 
-@app.post("/extract_single/", response_model=BatchResponse)
-async def extract_single_image(file: UploadFile = File(...)):
+@app.post("/extract_single", response_model=BatchResponse)
+async def extract_single_image(file: UploadFile = File(...), model_name: str = "resnet50"):
     """提取单张图像的特征"""
-    if current_extractor is None:
-        raise HTTPException(status_code=400, detail="请先设置模型")
+    global current_extractor
+    
+    # 如果没有设置模型或者模型名不匹配，则设置新模型
+    if current_extractor is None or current_extractor.model_name != model_name:
+        if model_name not in MODELS_CONFIG:
+            raise HTTPException(status_code=400, detail=f"不支持的模型: {model_name}")
+        
+        config = ModelConfig(model_name=model_name)
+        try:
+            current_extractor = ExtractorConfig(config)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"模型加载失败: {str(e)}")
         
     start_time = time.time()
     
@@ -142,11 +152,21 @@ async def extract_single_image(file: UploadFile = File(...)):
         model_name=current_extractor.model_name
     )
 
-@app.post("/extract_batch/", response_model=BatchResponse)
-async def extract_batch_images(files: List[UploadFile] = File(...)):
+@app.post("/extract_batch", response_model=BatchResponse)
+async def extract_batch_images(files: List[UploadFile] = File(...), model_name: str = "resnet50"):
     """批量提取图像特征"""
-    if current_extractor is None:
-        raise HTTPException(status_code=400, detail="请先设置模型")
+    global current_extractor
+    
+    # 如果没有设置模型或者模型名不匹配，则设置新模型
+    if current_extractor is None or current_extractor.model_name != model_name:
+        if model_name not in MODELS_CONFIG:
+            raise HTTPException(status_code=400, detail=f"不支持的模型: {model_name}")
+        
+        config = ModelConfig(model_name=model_name)
+        try:
+            current_extractor = ExtractorConfig(config)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"模型加载失败: {str(e)}")
         
     start_time = time.time()
     
@@ -180,7 +200,7 @@ async def get_model_info():
         "model_config": current_extractor.model.default_cfg
     }
 
-@app.get("/benchmark/")
+@app.get("/benchmark")
 async def run_benchmark():
     """运行性能测试"""
     if current_extractor is None:

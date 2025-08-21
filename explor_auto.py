@@ -25,84 +25,149 @@ model = ChatOpenAI(
 
 def tsk_setting(state: State):
     # Task-related settings
-    message = [
-        SystemMessage("Please reply with only the application name"),
-        HumanMessage(
-            f"The task goal is: {state['tsk']}, please infer the related application name. (The application name should not contain spaces) and reply with only one"
-        ),
-    ]
-    llm_response = model.invoke(message)
-    app_name = llm_response.content
-    state["app_name"] = app_name
-    state["context"] = [
-        HumanMessage(
-            f"The task goal is: {state['tsk']}, the inferred application name is: {app_name}"
-        )
-    ]
+    try:
+        print(f"🔧 tsk_setting: Processing task: '{state.get('tsk', 'NO TASK')}'")
+        
+        if not state.get("tsk"):
+            print(f"❌ Error: No task provided in state")
+            state["errors"] = state.get("errors", [])
+            state["errors"].append({"step": "tsk_setting", "error": "No task provided"})
+            return state
+            
+        message = [
+            SystemMessage("Please reply with only the application name"),
+            HumanMessage(
+                f"The task goal is: {state['tsk']}, please infer the related application name. (The application name should not contain spaces) and reply with only one"
+            ),
+        ]
+        llm_response = model.invoke(message)
+        app_name = llm_response.content
+        state["app_name"] = app_name
+        print(f"🔧 tsk_setting: Inferred app name: '{app_name}'")
+        
+        state["context"] = [
+            HumanMessage(
+                f"The task goal is: {state['tsk']}, the inferred application name is: {app_name}"
+            )
+        ]
 
-    # Validate device parameter before calling get_device_size
-    device = state.get("device", "emulator-5554")
-    if not isinstance(device, str):
-        print(f"❌ Error in tsk_setting: Device parameter is not a string: {type(device)} - {device}")
-        device = "emulator-5554"
-        print(f"🔄 Using fallback device: {device}")
-        state["device"] = device  # Update state with corrected device
-    
-    state["device_info"] = get_device_size.invoke(device)
+        # Validate device parameter before calling get_device_size
+        device = state.get("device", "emulator-5554")
+        if not isinstance(device, str):
+            print(f"❌ Error in tsk_setting: Device parameter is not a string: {type(device)} - {device}")
+            device = "emulator-5554"
+            print(f"🔄 Using fallback device: {device}")
+            state["device"] = device  # Update state with corrected device
+        
+        print(f"🔧 tsk_setting: Getting device size for: '{device}'")
+        device_info = get_device_size.invoke(device)
+        state["device_info"] = device_info
+        print(f"🔧 tsk_setting: Device info: {device_info}")
 
-    # Prepare additional information to pass to the callback function
-    callback_info = {
-        "app_name": state["app_name"],
-        "device_info": state["device_info"],
-        "task": state["tsk"],
-    }
+        # Prepare additional information to pass to the callback function
+        callback_info = {
+            "app_name": state["app_name"],
+            "device_info": state["device_info"],
+            "task": state["tsk"],
+        }
 
-    # Call the callback function (if any)
-    if state.get("callback"):
-        # Pass both the current node name and additional information to the callback function
-        state["callback"](state, node_name="tsk_setting", info=callback_info)
+        # Call the callback function (if any)
+        if state.get("callback"):
+            # Pass both the current node name and additional information to the callback function
+            state["callback"](state, node_name="tsk_setting", info=callback_info)
 
-    return state
+        print(f"🔧 tsk_setting: Completed successfully")
+        return state
+        
+    except Exception as e:
+        print(f"❌ Error in tsk_setting: {str(e)}")
+        state["errors"] = state.get("errors", [])
+        state["errors"].append({"step": "tsk_setting", "error": str(e)})
+        import traceback
+        print(f"❌ Traceback: {traceback.format_exc()}")
+        return state
 
 
 def page_understand(state: State):
     """
     Understand the current page
     """
-    # Validate device parameter before calling take_screenshot
-    device = state.get("device", "emulator-5554")
-    if not isinstance(device, str):
-        print(f"❌ Error in page_understand: Device parameter is not a string: {type(device)} - {device}")
-        device = "emulator-5554"
-        print(f"🔄 Using fallback device: {device}")
-    
-    screen_img = take_screenshot.invoke(
-        {
-            "device": device,
-            "app_name": state["app_name"],
-            "step": state["step"],
-        }
-    )
-    screen_result = screen_element.invoke(
-        {
-            "image_path": screen_img,
-        }
-    )
-    state["current_page_screenshot"] = screen_img
-    state["current_page_json"] = screen_result["parsed_content_json_path"]
-    # Call the callback function (if any)
-    if state.get("callback"):
-        state["callback"](state, node_name="page_understand")
+    try:
+        print(f"📸 page_understand: Starting for step {state.get('step', 0)}")
+        
+        # Validate device parameter before calling take_screenshot
+        device = state.get("device", "emulator-5554")
+        if not isinstance(device, str):
+            print(f"❌ Error in page_understand: Device parameter is not a string: {type(device)} - {device}")
+            device = "emulator-5554"
+            print(f"🔄 Using fallback device: {device}")
+        
+        app_name = state.get("app_name", "unknown_app")
+        print(f"📸 page_understand: Taking screenshot for device='{device}', app='{app_name}', step={state.get('step', 0)}")
+        
+        screen_img = take_screenshot.invoke(
+            {
+                "device": device,
+                "app_name": app_name,
+                "step": state["step"],
+            }
+        )
+        
+        # Check if screenshot was successful
+        if "failed" in screen_img.lower() or "error" in screen_img.lower():
+            print(f"❌ Screenshot failed: {screen_img}")
+            state["errors"] = state.get("errors", [])
+            state["errors"].append({"step": "page_understand", "error": f"Screenshot failed: {screen_img}"})
+            return state
+            
+        print(f"📸 page_understand: Screenshot saved to: {screen_img}")
+        
+        print(f"🔍 page_understand: Parsing screen elements...")
+        screen_result = screen_element.invoke(
+            {
+                "image_path": screen_img,
+            }
+        )
+        
+        # Check if screen parsing was successful
+        if "error" in screen_result:
+            print(f"❌ Screen parsing failed: {screen_result['error']}")
+            state["errors"] = state.get("errors", [])
+            state["errors"].append({"step": "page_understand", "error": f"Screen parsing failed: {screen_result['error']}"})
+            return state
+            
+        print(f"🔍 page_understand: Parsing successful, JSON saved to: {screen_result.get('parsed_content_json_path', 'NOT FOUND')}")
+        
+        state["current_page_screenshot"] = screen_img
+        state["current_page_json"] = screen_result["parsed_content_json_path"]
+        
+        # Update page_history with the screenshot path
+        if not isinstance(state["page_history"], list):
+            state["page_history"] = []
+        state["page_history"].append(screen_img)
+        
+        # Call the callback function (if any)
+        if state.get("callback"):
+            state["callback"](state, node_name="page_understand")
 
-    # Add tool result to state
-    if not isinstance(state["tool_results"], list):
-        state["tool_results"] = []
+        # Add tool result to state
+        if not isinstance(state["tool_results"], list):
+            state["tool_results"] = []
 
-    state["tool_results"].append(
-        {"tool_name": "screen_element", "result": screen_result}
-    )
+        state["tool_results"].append(
+            {"tool_name": "screen_element", "result": screen_result}
+        )
 
-    return state
+        print(f"📸 page_understand: Completed successfully")
+        return state
+        
+    except Exception as e:
+        print(f"❌ Error in page_understand: {str(e)}")
+        state["errors"] = state.get("errors", [])
+        state["errors"].append({"step": "page_understand", "error": str(e)})
+        import traceback
+        print(f"❌ Traceback: {traceback.format_exc()}")
+        return state
 
 
 def perform_action(state: State):
@@ -324,8 +389,8 @@ def tsk_completed(state: State):
     # Update state["completed"] based on LLM's answer
     # Assuming LLM answers "yes" or "no", of course, it can be conditionally adapted based on actual model output
     if "yes" in judgement_answer or "complete" in judgement_answer.lower():
-        # state["current_page_screenshot"] = None
         state["completed"] = True
+        # Take final screenshot and parse to capture the completion state
         screen_img = take_screenshot.invoke(
             {
                 "device": state["device"],
@@ -340,6 +405,11 @@ def tsk_completed(state: State):
         )
         state["current_page_screenshot"] = screen_img
         state["current_page_json"] = screen_result["parsed_content_json_path"]
+        
+        # Update page_history with final screenshot
+        if not isinstance(state["page_history"], list):
+            state["page_history"] = []
+        state["page_history"].append(screen_img)
     else:
         state["completed"] = False
 
@@ -353,7 +423,7 @@ def tsk_completed(state: State):
         SystemMessage(content=f"Final task completion status: {state['completed']}")
     )
 
-    if state["step"] > 5:  # Debug use
+    if state["step"] > 5:  # Debug use - force completion after 5 steps
         screen_img = take_screenshot.invoke(
             {
                 "device": state["device"],
@@ -368,6 +438,13 @@ def tsk_completed(state: State):
         )
         state["current_page_screenshot"] = screen_img
         state["current_page_json"] = screen_result["parsed_content_json_path"]
+        
+        # Update page_history with final screenshot for debug completion
+        if not isinstance(state["page_history"], list):
+            state["page_history"] = []
+        state["page_history"].append(screen_img)
+        
+        state["completed"] = True
         return True
     return state["completed"]
 

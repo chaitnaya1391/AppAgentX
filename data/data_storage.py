@@ -35,11 +35,7 @@ def state2json(state: State, save_path: str = None) -> str:
         # Add final_page field, including the screenshot and JSON information of the last page
         "final_page": {
             "screenshot": state.get("current_page_screenshot", ""),
-            "page_json": (
-                state.get("current_page_json", {}).get("parsed_content_json_path", "")
-                if isinstance(state.get("current_page_json"), dict)
-                else state.get("current_page_json", "")
-            ),
+            "page_json": state.get("current_page_json", ""),
         },
     }
 
