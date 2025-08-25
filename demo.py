@@ -412,7 +412,18 @@ with gr.Blocks(
             def start_session():
                 global temp_state
                 if not temp_state:
-                    return None
+                    # Return default values for all 9 output components when temp_state is None
+                    return (
+                        gr.update(),  # start_button - no change
+                        gr.update(),  # stop_button - no change
+                        gr.update(),  # action - no change
+                        gr.update(),  # action_button - no change
+                        gr.update(),  # element_number - no change
+                        gr.update(),  # text_input - no change
+                        gr.update(),  # swipe_direction - no change
+                        "Error: No active state found. Please initialize the session first.",  # human_demo_output
+                        [],  # screenshot_gallery_user - empty list
+                    )
 
                 temp_state = capture_and_parse_page(
                     temp_state

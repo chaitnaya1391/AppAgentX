@@ -260,8 +260,8 @@ def json2db(json_path: str):
                     print(f"Failed to create relationship for element {element_properties['element_id']} on page {page_properties['page_id']}")
                 
                 # Process the visual features of the element and store them in the vector database
-                # Only if element creation was successful
-                if element_data.get("ID") is not None:  # Process all elements with valid IDs
+                # ONLY FOR CLICKED ELEMENTS to avoid performance issues
+                if is_clicked_element and element_data.get("ID") is not None:
                     success = element2vector(
                         str(element_data["ID"]),
                         element_properties["element_id"],
@@ -336,20 +336,9 @@ def json2db(json_path: str):
                         if not relationship_success:
                             print(f"Failed to create relationship for final page element {element_properties['element_id']}")
                         
-                        # Process the visual features of the element and store them in the vector database
-                        # Only if element creation was successful
-                        if element_data.get("ID") is not None:
-                            success = element2vector(
-                                str(element_data["ID"]),
-                                element_properties["element_id"],
-                                json.dumps([element_data]),  # Single element data
-                                data["final_page"].get("screenshot", ""),
-                                vector_store,
-                            )
-                            if not success:
-                                print(
-                                    f"Warning: Vector storage failed for final page element {element_data['ID']}"
-                                )
+                        # Skip vector processing for final page elements to avoid performance issues
+                        # Final page elements are not interactive, so no need for vector embeddings
+                        pass
                     else:
                         print(f"Failed to create final page element node for element with original ID {element_data.get('ID', 'unknown')}")
         else:

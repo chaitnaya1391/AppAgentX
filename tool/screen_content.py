@@ -162,7 +162,8 @@ def screen_element(image_path: str) -> Dict:
     try:
         with open(image_path, "rb") as file:
             files = [("file", (os.path.basename(image_path), file, "image/png"))]
-            response = requests.post(api_url, files=files)
+            # Add timeout to prevent hanging indefinitely
+            response = requests.post(api_url, files=files, timeout=60)
 
         # Check response status
         if response.status_code != 200:
@@ -210,6 +211,10 @@ def screen_element(image_path: str) -> Dict:
             "elapsed_time": elapsed_time,
         }
 
+    except requests.exceptions.Timeout:
+        return {"error": "OmniParser request timed out after 60 seconds. The service may be overloaded or unavailable."}
+    except requests.exceptions.RequestException as e:
+        return {"error": f"Network error occurred while calling OmniParser: {str(e)}"}
     except Exception as e:
         return {"error": f"An exception occurred during tool execution: {str(e)}"}
 
