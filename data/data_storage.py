@@ -176,78 +176,105 @@ def json2db(json_path: str):
             page_properties["elements"] = json.dumps(elements_data)
 
         # Create page node
-        db.create_page(page_properties)
-        pages_info.append({"page_id": page_properties["page_id"], "step": step["step"]})
+        page_node_id = db.create_page(page_properties)
+        if page_node_id:
+            print(f"📄 Created page for step {step['step']} with page_id: {page_properties['page_id']}")
+            pages_info.append({"page_id": page_properties["page_id"], "step": step["step"]})
+        else:
+            print(f"❌ Failed to create page for step {step['step']}")
+            continue  # Skip processing elements for this step if page creation failed
 
-        # Modify element node processing logic
+        # Modify element node processing logic to process ALL elements on the page
         tool_result = step["tool_result"]
         action_type = tool_result.get("action")
-
-        # Get element information
-        element_info = None
         clicked_element = tool_result.get("clicked_element")
 
-        if action_type == "tap":
-            element_info = pos2id(
+        # Get the clicked element info for reference
+        clicked_element_info = None
+        if action_type == "tap" and clicked_element:
+            clicked_element_info = pos2id(
                 clicked_element["x"],
                 clicked_element["y"],
                 step["source_json"].replace("\\", "/"),
             )
-        else:
-            element_info = {"ID": "", "bbox": [], "type": "", "content": ""}
 
-        if element_info:
-            parameters = {
-                k: v
-                for k, v in tool_result.items()
-                if k not in ["action", "device", "status"]
-            }
+        # Process ALL elements on the page (not just the clicked one)
+        print(f"🔍 Processing {len(elements_data)} elements for step {step['step']}")
+        for idx, element_data in enumerate(elements_data):
+            # Check if this is the element that was actually clicked
+            is_clicked_element = False
+            if clicked_element_info and element_data.get("ID") == clicked_element_info.get("ID"):
+                is_clicked_element = True
+
+            # Prepare parameters for the clicked element, empty for others
+            if is_clicked_element:
+                parameters = {
+                    k: v
+                    for k, v in tool_result.items()
+                    if k not in ["action", "device", "status"]
+                }
+            else:
+                parameters = {}
 
             element_properties = {
                 "element_id": str(uuid4()),
-                "element_original_id": element_info.get("ID", ""),
+                "element_original_id": element_data.get("ID", ""),
                 "description": "",
-                "action_type": action_type,
+                "action_type": "tap",  # All elements are potentially tappable
                 "parameters": json.dumps(parameters),
-                "bounding_box": element_info.get("bbox", []),
+                "bounding_box": element_data.get("bbox", []),
                 "other_info": json.dumps(
                     {
-                        "type": element_info.get("type", ""),
-                        "content": element_info.get("content", ""),
+                        "type": element_data.get("type", ""),
+                        "content": element_data.get("content", ""),
+                        "is_clicked": is_clicked_element,
+                        "interactivity": element_data.get("interactivity", True),
                     }
                 ),
             }
 
             # Create element node
-            db.create_element(element_properties)
-            elements_info.append(
-                {
-                    "element_id": element_properties["element_id"],
-                    "step": step["step"],
-                    "action": step["recommended_action"],
-                    "status": tool_result["status"],
-                    "timestamp": step["timestamp"],
-                }
-            )
-
-            # Establish element to page ownership relationship
-            db.add_element_to_page(
-                page_properties["page_id"], element_properties["element_id"]
-            )
-
-            # Process the visual features of the element and store them in the vector database
-            if element_info.get("ID"):  # Only process valid element ID
-                success = element2vector(
-                    str(element_info["ID"]),
-                    element_properties["element_id"],
-                    json.dumps(elements_data),
-                    step["source_page"],
-                    vector_store,
-                )
-                if not success:
-                    print(
-                        f"Warning: Vector storage failed for element {element_info['ID']}"
+            print(f"🔧 Creating element {idx+1}/{len(elements_data)} with original ID: {element_data.get('ID', 'unknown')}")
+            element_node_id = db.create_element(element_properties)
+            
+            # Only proceed if element creation was successful
+            if element_node_id:
+                # Only add the clicked element to elements_info for the action chain
+                if is_clicked_element:
+                    elements_info.append(
+                        {
+                            "element_id": element_properties["element_id"],
+                            "step": step["step"],
+                            "action": step["recommended_action"],
+                            "status": tool_result["status"],
+                            "timestamp": step["timestamp"],
+                        }
                     )
+
+                # Establish element to page ownership relationship for ALL elements
+                relationship_success = db.add_element_to_page(
+                    page_properties["page_id"], element_properties["element_id"]
+                )
+                
+                if not relationship_success:
+                    print(f"Failed to create relationship for element {element_properties['element_id']} on page {page_properties['page_id']}")
+                
+                # Process the visual features of the element and store them in the vector database
+                # Only if element creation was successful
+                if element_data.get("ID") is not None:  # Process all elements with valid IDs
+                    success = element2vector(
+                        str(element_data["ID"]),
+                        element_properties["element_id"],
+                        json.dumps([element_data]),  # Single element data
+                        step["source_page"],
+                        vector_store,
+                    )
+                    if not success:
+                        print(
+                            f"Warning: Vector storage failed for element {element_data['ID']}"
+                        )
+            else:
+                print(f"Failed to create element node for element with original ID {element_data.get('ID', 'unknown')}")
 
     # Create final page node (if exists)
     if data.get("final_page"):
@@ -262,18 +289,71 @@ def json2db(json_path: str):
         if data["final_page"].get("page_json"):
             elements_path = Path(data["final_page"]["page_json"].replace("\\", "/"))
             with open(elements_path, "r", encoding="utf-8") as f:
-                elements_data = json.load(f)
-                final_page_properties["elements"] = json.dumps(elements_data)
+                final_elements_data = json.load(f)
+                final_page_properties["elements"] = json.dumps(final_elements_data)
         else:
-            final_page_properties["elements"] = json.dumps(
-                []
-            )  # If no element data, set to empty list
+            final_page_properties["elements"] = json.dumps([])  # If no element data, set to empty list
 
-        # Create final page node
-        db.create_page(final_page_properties)
-        pages_info.append(
-            {"page_id": final_page_properties["page_id"], "step": "final"}
-        )
+        # Create final page node FIRST
+        final_page_node_id = db.create_page(final_page_properties)
+        if final_page_node_id:
+            print(f"📄 Created final page with page_id: {final_page_properties['page_id']}")
+            pages_info.append(
+                {"page_id": final_page_properties["page_id"], "step": "final"}
+            )
+            
+            # Now process elements AFTER the page is created
+            if data["final_page"].get("page_json"):
+                # Process ALL elements on the final page as well
+                for element_data in final_elements_data:
+                    element_properties = {
+                        "element_id": str(uuid4()),
+                        "element_original_id": element_data.get("ID", ""),
+                        "description": "",
+                        "action_type": "tap",  # All elements are potentially tappable
+                        "parameters": json.dumps({}),  # No action performed on final page
+                        "bounding_box": element_data.get("bbox", []),
+                        "other_info": json.dumps(
+                            {
+                                "type": element_data.get("type", ""),
+                                "content": element_data.get("content", ""),
+                                "is_clicked": False,  # No clicks on final page
+                                "interactivity": element_data.get("interactivity", True),
+                            }
+                        ),
+                    }
+
+                    # Create element node
+                    element_node_id = db.create_element(element_properties)
+
+                    # Only proceed if element creation was successful
+                    if element_node_id:
+                        # Establish element to page ownership relationship
+                        relationship_success = db.add_element_to_page(
+                            final_page_properties["page_id"], element_properties["element_id"]
+                        )
+                        
+                        if not relationship_success:
+                            print(f"Failed to create relationship for final page element {element_properties['element_id']}")
+                        
+                        # Process the visual features of the element and store them in the vector database
+                        # Only if element creation was successful
+                        if element_data.get("ID") is not None:
+                            success = element2vector(
+                                str(element_data["ID"]),
+                                element_properties["element_id"],
+                                json.dumps([element_data]),  # Single element data
+                                data["final_page"].get("screenshot", ""),
+                                vector_store,
+                            )
+                            if not success:
+                                print(
+                                    f"Warning: Vector storage failed for final page element {element_data['ID']}"
+                                )
+                    else:
+                        print(f"Failed to create final page element node for element with original ID {element_data.get('ID', 'unknown')}")
+        else:
+            print(f"❌ Failed to create final page")
 
     # Second loop: establish element->page leads_to relationship
     for i in range(len(elements_info)):

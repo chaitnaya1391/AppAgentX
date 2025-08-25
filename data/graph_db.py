@@ -154,10 +154,24 @@ class Neo4jDatabase:
         """Generic node creation function"""
         query = f"CREATE (n:{label} $properties) " "RETURN elementId(n) as node_id"
 
-        with self.driver.session(database="neo4j") as session:
-            result = session.run(query, properties=properties)
-            record = result.single()
-            return str(record["node_id"]) if record else None
+        try:
+            with self.driver.session(database="neo4j") as session:
+                result = session.run(query, properties=properties)
+                record = result.single()
+                node_id = str(record["node_id"]) if record else None
+                
+                if node_id:
+                    # Get the ID field for this node type
+                    id_field = f"{label.lower()}_id"
+                    node_identifier = properties.get(id_field, "unknown")
+                    print(f"✅ Successfully created {label} node with {id_field}: {node_identifier} (internal ID: {node_id})")
+                else:
+                    print(f"❌ Failed to create {label} node - query returned no results")
+                
+                return node_id
+        except Exception as e:
+            print(f"❌ Error creating {label} node: {str(e)}")
+            return None
 
     def add_element_to_page(self, page_id: str, element_id: str) -> bool:
         """Create Page-HAS_ELEMENT->Element relationship"""
@@ -174,9 +188,7 @@ class Neo4jDatabase:
                 record = result.single()
                 success = record is not None
                 if not success:
-                    print(
-                        f"Warning: Failed to create HAS_ELEMENT relationship between page {page_id} and element {element_id}"
-                    )
+                    print(f"Warning: Failed to create HAS_ELEMENT relationship between page {page_id} and element {element_id}")
                 return success
         except Exception as e:
             print(f"Error creating HAS_ELEMENT relationship: {str(e)}")
@@ -335,50 +347,101 @@ class Neo4jDatabase:
             print(f"Error getting chain start nodes: {str(e)}")
             return []
 
-    def get_chain_from_start(self, start_page_id: str) -> List[List[Dict[str, Any]]]:
+    def get_chain_from_start(self, start_page_id: str) -> List[Dict[str, Any]]:
         """Get complete operation chain from starting node, returning triplet chain structure
 
         Args:
             start_page_id: ID of the starting page
 
         Returns:
-            List[List[Dict]]: List containing complete chain information, each chain consists of multiple triplets
-            Each triplet contains:
+            List[Dict]: List containing triplet chain information, each triplet contains:
                 - source_page: Source page node information
                 - element: Element node information
                 - target_page: Target page node information
                 - action: Action information
         """
-        query = """
-        MATCH path = (start:Page {page_id: $start_page_id})-[:HAS_ELEMENT|LEADS_TO*]->(end:Page)
-        WHERE NOT EXISTS { (end)-[:HAS_ELEMENT]->() }  // Ensure it's an endpoint page
-        WITH path, relationships(path) as rels, nodes(path) as nodes
-        WITH DISTINCT [n in nodes | n{.*}] as node_props,
-             [r in rels | r{.*}] as rel_props
-        RETURN node_props, rel_props
-        """
+        # Try multiple queries to find chains, starting with most restrictive
+        queries = [
+            # Query 1: Look for complete chains ending at pages with no elements (original logic)
+            """
+            MATCH path = (start:Page {page_id: $start_page_id})-[:HAS_ELEMENT|LEADS_TO*]->(end:Page)
+            WHERE NOT EXISTS { (end)-[:HAS_ELEMENT]->() }
+            WITH path, relationships(path) as rels, nodes(path) as nodes
+            WITH DISTINCT [n in nodes | n{.*}] as node_props,
+                 [r in rels | r{.*}] as rel_props
+            RETURN node_props, rel_props
+            """,
+            # Query 2: Look for any chains ending at pages (relaxed constraint)
+            """
+            MATCH path = (start:Page {page_id: $start_page_id})-[:HAS_ELEMENT|LEADS_TO*]->(end:Page)
+            WHERE start <> end
+            WITH path, relationships(path) as rels, nodes(path) as nodes
+            WITH DISTINCT [n in nodes | n{.*}] as node_props,
+                 [r in rels | r{.*}] as rel_props
+            RETURN node_props, rel_props
+            LIMIT 10
+            """,
+            # Query 3: Look for any element->page LEADS_TO relationships from this start page
+            """
+            MATCH (start:Page {page_id: $start_page_id})-[:HAS_ELEMENT]->(e:Element)-[r:LEADS_TO]->(target:Page)
+            RETURN [start{.*}, e{.*}, target{.*}] as node_props,
+                   [{}, r{.*}] as rel_props
+            """
+        ]
 
         try:
             with self.driver.session(database="neo4j") as session:
-                result = session.run(query, start_page_id=start_page_id)
                 chains = []
                 seen_chains = set()  # For deduplication
 
-                for record in result:
+                # Try each query until we find results
+                for query_idx, query in enumerate(queries):
+                    result = session.run(query, start_page_id=start_page_id)
+                    query_results = list(result)
+                    
+                    if query_results:
+                        print(f"Found {len(query_results)} chain records using query {query_idx + 1}")
+                        break
+                else:
+                    print("Warning: No triplets found - no chain paths exist from this start page")
+                    return []
+
+                for record in query_results:
                     nodes = record["node_props"]
                     rels = record["rel_props"]
 
-                    # Build triplet chain
-                    chain = []
-                    current_page = nodes[0]
-                    i = 0
+                    if not nodes or len(nodes) < 3:
+                        continue  # Skip incomplete records
 
-                    while i < len(rels):
-                        # Handle HAS_ELEMENT relationship
-                        if "element_id" in nodes[i + 1]:  # Found element node
+                    # For query 3 (simple triplet), directly build the result
+                    if len(nodes) == 3 and len(rels) == 2:
+                        if "page_id" in nodes[0] and "element_id" in nodes[1] and "page_id" in nodes[2]:
+                            triplet = {
+                                "source_page": nodes[0],
+                                "element": nodes[1],
+                                "target_page": nodes[2],
+                                "action": rels[1] if len(rels) > 1 else {},
+                            }
+                            chains.append(triplet)
+                            continue
+
+                    # For complex paths, build triplet chain
+                    chain = []
+                    current_page = nodes[0] if "page_id" in nodes[0] else None
+                    if not current_page:
+                        continue
+                    
+                    i = 0
+                    while i < len(rels) and i + 1 < len(nodes):
+                        # Check if next node is an element
+                        if i + 1 < len(nodes) and "element_id" in nodes[i + 1]:
                             element = nodes[i + 1]
-                            # Continue looking for LEADS_TO relationship
-                            if i + 1 < len(rels) and "action_name" in rels[i + 1]:
+                            # Look for LEADS_TO relationship and target page
+                            if (i + 1 < len(rels) and 
+                                "action_name" in rels[i + 1] and 
+                                i + 2 < len(nodes) and
+                                "page_id" in nodes[i + 2]):
+                                
                                 target_page = nodes[i + 2]
                                 # Build triplet
                                 triplet = {
@@ -396,20 +459,26 @@ class Neo4jDatabase:
                             i += 1
 
                     if chain:  # Only add non-empty chains
-                        # Create unique identifier for the chain
-                        chain_key = tuple(
-                            (
-                                t["source_page"]["page_id"],
-                                t["element"]["element_id"],
-                                t["target_page"]["page_id"],
-                            )
-                            for t in chain
-                        )
-                        if chain_key not in seen_chains:
-                            seen_chains.add(chain_key)
-                            chains.append(chain)
+                        chains.extend(chain)  # Add individual triplets to the result
 
-                return chains[0]
+                # Remove duplicates
+                unique_chains = []
+                for triplet in chains:
+                    triplet_key = (
+                        triplet["source_page"]["page_id"],
+                        triplet["element"]["element_id"],
+                        triplet["target_page"]["page_id"],
+                    )
+                    if triplet_key not in seen_chains:
+                        seen_chains.add(triplet_key)
+                        unique_chains.append(triplet)
+
+                if not unique_chains:
+                    print("Warning: No triplets found after processing chain records")
+                    return []
+
+                return unique_chains
+                
         except Exception as e:
             print(f"Error getting chain from start node: {str(e)}")
             return []

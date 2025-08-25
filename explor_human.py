@@ -32,7 +32,7 @@ def capture_and_parse_page(state: State) -> State:
             "device": device_id,
             "save_dir": "./log/screenshots",
             "app_name": app_name,
-            "step": state["step"] + 1,
+            "step": state["step"],
         }
     )
 
