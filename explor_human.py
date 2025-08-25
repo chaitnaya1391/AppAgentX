@@ -317,8 +317,11 @@ def single_human_explor(state: State, action: str, **kwargs) -> State:
             state["tool_results"].append(
                 {"tool_name": "screen_action", "action_result": action_dict}
             )
+            # Update step counter BEFORE capturing the next page
+            state["step"] += 1
+            
             step_record = {
-                "step": state["step"],
+                "step": state["step"] - 1,  # Use the step that was just executed
                 "recommended_action": f"Executing {action} operation with parameters {kwargs}",
                 "tool_result": {
                     "action": action,
@@ -344,6 +347,7 @@ def single_human_explor(state: State, action: str, **kwargs) -> State:
                 "error_msg": f"Unsupported action: {action}",
             }
         )
+        state["step"] += 1
+    
     state = capture_and_parse_page(state)
-    state["step"] += 1
     return state

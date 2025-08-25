@@ -277,9 +277,12 @@ def perform_action(state: State):
         tool_output["tool_name"] = "screen_action"  # Or other corresponding tool name
         state["tool_results"].append(tool_output)
 
+    # Update step counter BEFORE adding to history
+    state["step"] += 1
+
     # Add this operation record to history step record for future query
     step_record = {
-        "step": state["step"],
+        "step": state["step"] - 1,  # Use the step that was just executed
         "recommended_action": recommended_action,
         "tool_result": tool_output,
         "source_page": state["current_page_screenshot"],
@@ -287,9 +290,6 @@ def perform_action(state: State):
         "timestamp": datetime.datetime.now().isoformat(),
     }
     state["history_steps"].append(step_record)
-
-    # Update step counter
-    state["step"] += 1
 
     # Call callback
     if state.get("callback"):

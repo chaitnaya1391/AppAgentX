@@ -9,6 +9,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field, SecretStr
 import config
 from data.graph_db import Neo4jDatabase
+from chain_understand import apply_deep_node_deduplication
 
 # Configure environment variables
 os.environ["LANGCHAIN_TRACING_V2"] = config.LANGCHAIN_TRACING_V2
@@ -64,7 +65,15 @@ def create_chain_evaluation_chain():
         [
             (
                 "system",
-                "You are an AI assistant specialized in evaluating whether UI operation chains can be templated. You need to analyze the given UI operation chain and determine if it has the potential for templating.",
+                """You are an AI assistant specialized in evaluating whether UI operation chains can be templated. 
+                You should be OPTIMISTIC about templating opportunities and recognize common patterns like:
+                - Product browsing/catalog navigation (very templatable)
+                - Form filling workflows (very templatable)  
+                - Menu navigation sequences (very templatable)
+                - Search and filter operations (very templatable)
+                - Any repetitive interaction patterns (templatable)
+                
+                Focus on identifying reusable patterns rather than requiring perfect end-to-end completeness.""",
             ),
             (
                 "human",
@@ -75,18 +84,37 @@ Task description: {task_description}
 Chain operations:
 {chain_operations}
 
-Please evaluate from the following aspects:
-1. Does this operation chain have clear start and end steps?
-2. Do the operations in the chain have clear business logic and goals?
-3. Do these operations form a complete and meaningful task flow?
-4. Is it possible to reuse this chain in other similar tasks?
-5. Are there obvious parameterizable parts?
+IMPORTANT: Be generous in identifying templatable patterns. Consider these factors:
 
-Please return your evaluation results in a structured manner, including the following fields:
-- is_templateable: Whether it can be templated (boolean)
-- confidence_score: Confidence score (float between 0-1)
-- reason: Detailed evaluation reason
-- suggested_name: If it can be templated, the suggested high-level action name
+✅ STRONGLY FAVOR templating if you see:
+1. **Navigation patterns**: Moving through product catalogs, menus, or lists
+2. **Interaction patterns**: Repeated tapping/clicking on similar elements
+3. **Browsing behaviors**: Exploring content, viewing details, going back
+4. **Form interactions**: Filling fields, selecting options, submitting
+5. **Search/filter workflows**: Searching, filtering, sorting content
+
+✅ RECOGNIZE that these are HIGHLY templatable:
+- Browsing product listings and viewing details
+- Navigating through app sections or categories  
+- Exploring content feeds or galleries
+- Any sequence that users would naturally repeat
+
+❌ Only reject if the chain is:
+- Completely random/chaotic actions with no pattern
+- Single isolated action with no sequence
+- Error recovery or broken workflow
+
+Evaluation criteria (be permissive):
+1. Does this show a recognizable interaction pattern? (browsing, navigation, etc.)
+2. Would users likely repeat similar sequences?
+3. Can the actions be parameterized (different products, categories, etc.)?
+4. Is there business value in templating this workflow?
+
+Please return your evaluation with a BIAS TOWARD TEMPLATABLE:
+- is_templateable: Whether it can be templated (boolean) - DEFAULT to true for navigation/browsing
+- confidence_score: Confidence score (float between 0-1) - be generous, 0.7+ for clear patterns
+- reason: Detailed evaluation reason explaining why it's templatable
+- suggested_name: Descriptive name for the high-level action
 
 {format_instructions}""",
             ),
@@ -115,38 +143,38 @@ def create_action_generation_chain():
         [
             (
                 "system",
-                "You are an AI assistant specialized in generating high-level UI operation nodes. You need to generate a complete description of a high-level action node based on the given chain information.",
+                "You are an AI assistant specialized in generating high-level UI operation nodes for any type of application or website. You need to generate a complete description of a high-level action node based on the given interaction chain information.",
             ),
             (
                 "human",
-                """Please generate a high-level action node based on the following UI operation chain information:
+                """Please generate a high-level action node based on the following UI interaction chain information:
 
-Task description: {task_description}
+    Task description: {task_description}
 
-Chain operations:
-{chain_operations}
+    Chain operations:
+    {chain_operations}
 
-Chain element details:
-{element_details}
+    Element details:
+    {element_details}
 
-Chain reasoning results:
-{reasoning_results}
+    Chain reasoning results:
+    {reasoning_results}
 
-Please generate a complete description of the high-level action node, including the following fields:
-- action_id: Generate a unique ID for the high-level action (format like: "high_level_action_xxx")
-- name: Concise name of the high-level action
-- description: Detailed description of the function, purpose, and execution process of the high-level action
-- preconditions: List of preconditions for executing the high-level action
-- element_sequence: Sequence of elements included in the high-level action, each element contains:
-  * element_id: Element ID
-  * order: Order of operation
-  * atomic_action: Atomic action performed on the element
-  * action_params: Action parameters (if any)
-- template_pattern: Template matching pattern, including:
-  * criteria: Applicable matching conditions
-  * parameter_fields: Parameterizable fields and their descriptions
+    Please generate a complete description of the high-level action node, including the following fields:
+    - action_id: Generate a unique ID for the high-level action (format like: "high_level_action_xxx")
+    - name: Concise name of the high-level action
+    - description: Detailed description of the function, purpose, and execution process of the high-level action
+    - preconditions: List of preconditions for executing the high-level action
+    - element_sequence: Sequence of UI elements included in the high-level action, each element contains:
+    * element_id: Element ID
+    * order: Order of interaction
+    * atomic_action: Atomic action performed on the element (e.g., click, type, select, hover, scroll)
+    * action_params: Action parameters (if any, such as text to input, options to select)
+    - template_pattern: Template matching pattern for reusability, including:
+    * criteria: Applicable matching conditions for similar UI contexts
+    * parameter_fields: Parameterizable fields and their descriptions for customization
 
-{format_instructions}""",
+    {format_instructions}""",
             ),
         ]
     )
@@ -197,10 +225,10 @@ def extract_task_description(chain: List[Dict[str, Any]]) -> str:
 
 # Format chain operations as text description
 def format_chain_operations(chain: List[Dict[str, Any]]) -> str:
-    """Format chain operations as text description.
+    """Format chain operations as text description using enhanced merged descriptions.
 
     Args:
-        chain: Triplet chain
+        chain: Triplet chain (potentially with enhanced merged descriptions)
 
     Returns:
         Formatted operation description text
@@ -208,12 +236,23 @@ def format_chain_operations(chain: List[Dict[str, Any]]) -> str:
     operations = []
 
     for i, triplet in enumerate(chain):
+        # Use enhanced descriptions if available, fallback to original
         source_page = triplet["source_page"].get("description", "Unknown page")
         element = triplet["element"].get("description", "Unknown element")
         target_page = triplet["target_page"].get("description", "Unknown page")
         action_name = triplet["action"].get("action_name", "Unknown operation")
+        
+        # Get action parameters for more detailed description
+        action_params = triplet["action"].get("action_params", {})
+        action_detail = action_name
+        if action_params:
+            if isinstance(action_params, dict) and action_params:
+                param_str = ", ".join([f"{k}: {v}" for k, v in action_params.items()])
+                action_detail = f"{action_name} ({param_str})"
+            elif action_params:
+                action_detail = f"{action_name} ({action_params})"
 
-        operation = f"Step {i+1}: On the page 【{source_page}】, perform the operation 【{action_name}】 on 【{element}】 to reach the page 【{target_page}】."
+        operation = f"Step {i+1}: On page 【{source_page}】, perform action 【{action_detail}】 on element 【{element}】 → reaches page 【{target_page}】"
         operations.append(operation)
 
     return "\n".join(operations)
@@ -221,10 +260,10 @@ def format_chain_operations(chain: List[Dict[str, Any]]) -> str:
 
 # Extract element details
 def extract_element_details(chain: List[Dict[str, Any]]) -> str:
-    """Extract detailed information of all elements in the chain.
+    """Extract detailed information of all elements in the chain using enhanced descriptions.
 
     Args:
-        chain: Triplet chain
+        chain: Triplet chain (potentially with enhanced merged descriptions)
 
     Returns:
         Element detail text
@@ -236,8 +275,13 @@ def extract_element_details(chain: List[Dict[str, Any]]) -> str:
         element_type = triplet["element"].get("element_type", "Unknown type")
         element_desc = triplet["element"].get("description", "Unknown description")
         action_name = triplet["action"].get("action_name", "Unknown operation")
+        action_params = triplet["action"].get("action_params", {})
 
         element_detail = f"Element {i+1}:\n  ID: {element_id}\n  Type: {element_type}\n  Description: {element_desc}\n  Related operation: {action_name}"
+        
+        if action_params:
+            element_detail += f"\n  Action parameters: {action_params}"
+            
         elements.append(element_detail)
 
     return "\n".join(elements)
@@ -458,16 +502,48 @@ async def evolve_chain_to_action(start_page_id: str) -> Optional[str]:
     try:
         # 1. Get the complete chain
         print(f"Getting the chain starting from page {start_page_id}...")
-        chain = db.get_chain_from_start(start_page_id)
+        raw_chain = db.get_chain_from_start(start_page_id)
 
-        if not chain:
+        if not raw_chain:
             print(f"No chain found starting from {start_page_id}")
             return None
 
-        print(f"Successfully retrieved the chain, total {len(chain)} triplets")
+        print(f"Successfully retrieved the raw chain, total {len(raw_chain)} triplets")
+        
+        # 1.5. Apply deep node deduplication with physical deletion
+        print(f"🔥 Applying deep node deduplication with physical deletion...")
+        try:
+            # Extract task info for better merging context
+            task_info = extract_task_description(raw_chain)
+            
+            # Apply deep node deduplication (this will physically delete duplicate nodes)
+            chain, deduplication_report = await apply_deep_node_deduplication(
+                chain=raw_chain,
+                task_info=task_info
+            )
+            
+            print(f"✅ Deep node deduplication completed:")
+            print(f"   - Physical deletion: {deduplication_report['summary']['nodes_physically_deleted']} nodes deleted")
+            print(f"   - Logical merging: {deduplication_report['summary']['nodes_logically_merged']} nodes updated")
+            print(f"   - Total descriptions merged: {deduplication_report['summary']['total_descriptions_merged']}")
+            print(f"   - Relationships redirected: {deduplication_report['summary']['relationships_updated']}")
+            print(f"   - Physical efficiency: {deduplication_report['summary']['physical_deletion_efficiency']:.2%}")
+            print(f"   - Logical efficiency: {deduplication_report['summary']['logical_merge_efficiency']:.2%}")
+            
+        except Exception as e:
+            print(f"⚠️ Deep node deduplication failed: {str(e)}")
+            print(f"   Continuing with original chain...")
+            chain = raw_chain
 
         # 2. Evaluate whether the chain can be templated
         print("Evaluating whether the chain can be templated...")
+        
+        # Add debugging information
+        print(f"🔍 Chain debug info:")
+        print(f"   Length: {len(chain)} triplets")
+        chain_operations = format_chain_operations(chain)
+        print(f"   Operations preview: {chain_operations[:200]}...")
+        
         is_templateable, evaluation_result = await evaluate_chain_templateability(chain)
 
         if not is_templateable:
@@ -476,7 +552,9 @@ async def evolve_chain_to_action(start_page_id: str) -> Optional[str]:
                 if evaluation_result is None
                 else evaluation_result.get("reason", "No reason provided")
             )
-            print(f"The chain is evaluated as non-templatable: {reason}")
+            print(f"❌ Chain is evaluated as non-templatable: {reason}")
+            print(f"🔍 Full chain operations for debugging:")
+            print(chain_operations)
             return None
 
         print(
