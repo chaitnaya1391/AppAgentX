@@ -840,8 +840,11 @@ with gr.Blocks(
                             add_log(
                                 "Calling AI for chain analysis, this may take some time..."
                             )
+                            # Check if category merging is enabled (you can add a UI checkbox for this)
+                            use_category_merging = True  # Set to True to enable category-based physical deletion
                             processed_triplets = await process_and_update_chain(
-                                matching_node["page_id"]
+                                start_page_id=matching_node["page_id"],
+                                use_category_merging=use_category_merging
                             )
                             progress(0.8, "Analysis complete, processing results...")
 
@@ -852,6 +855,23 @@ with gr.Blocks(
                             add_log(
                                 f"✓ Successfully processed {len(processed_triplets)} triplets"
                             )
+                            
+                            # Show category merge results if available
+                            if processed_triplets and 'category_merge_report' in processed_triplets[0]:
+                                category_report = processed_triplets[0]['category_merge_report']
+                                add_log(f"\n🏷️  Category-Based Page Merging Results:")
+                                add_log(f"   📊 {category_report['summary']['categories_identified']} page categories identified")
+                                add_log(f"   🗑️  {category_report['summary']['pages_physically_deleted']} pages physically deleted")
+                                add_log(f"   📈 {category_report['summary']['deletion_efficiency']:.1f}% deletion efficiency")
+                                add_log(f"   🔗 {category_report['summary']['relationships_updated']} relationships updated")
+                                
+                                # Show categories found
+                                if category_report.get('categories'):
+                                    add_log(f"\n📋 Page Categories Found:")
+                                    for category, details in category_report['categories'].items():
+                                        add_log(f"   • {category}: {details['page_count']} pages → 1 canonical page")
+                            elif use_category_merging:
+                                add_log(f"\n🔧 Used standard logical merging (no categories with multiple pages found)")
 
                             # Show example of first triplet processing result
                             if processed_triplets:

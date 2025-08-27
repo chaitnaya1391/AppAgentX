@@ -111,6 +111,47 @@ class EnhancedMergeResult(BaseModel):
     task_relevance_score: float = Field(description="Relevance score to the overall task (0-1)")
 
 
+class PageCategoryResult(BaseModel):
+    """Result of page category analysis"""
+    category_name: str = Field(description="The category name for this page (e.g., 'Home Page', 'Product Listing', 'Login Page')")
+    category_description: str = Field(description="A brief description of what this page category represents")
+    confidence_score: float = Field(description="Confidence in the categorization (0-1)")
+    key_elements: List[str] = Field(description="Key UI elements that identify this category")
+
+
+class PageCategoryManager:
+    """Manages page categorization and category-based merging"""
+    
+    def __init__(self):
+        self.page_categories: Dict[str, List[str]] = {}  # Maps category_name -> [page_ids]
+        self.page_to_category: Dict[str, str] = {}  # Maps page_id -> category_name
+        self.category_descriptions: Dict[str, str] = {}  # Maps category_name -> merged_description
+        self.category_metadata: Dict[str, Dict] = {}  # Maps category_name -> metadata
+    
+    def add_page_to_category(self, page_id: str, category_name: str, description: str, metadata: Dict = None):
+        """Add a page to a category"""
+        if category_name not in self.page_categories:
+            self.page_categories[category_name] = []
+            self.category_descriptions[category_name] = ""
+            self.category_metadata[category_name] = {}
+        
+        if page_id not in self.page_categories[category_name]:
+            self.page_categories[category_name].append(page_id)
+        
+        self.page_to_category[page_id] = category_name
+        
+        if metadata:
+            self.category_metadata[category_name].update(metadata)
+    
+    def get_categories_for_merging(self) -> List[Tuple[str, List[str]]]:
+        """Get categories that have multiple pages and need merging"""
+        return [(cat, pages) for cat, pages in self.page_categories.items() if len(pages) > 1]
+    
+    def get_all_categories(self) -> List[str]:
+        """Get all category names"""
+        return list(self.page_categories.keys())
+
+
 # Data structure for managing node deduplication
 class NodeDeduplicationManager:
     """Manages node deduplication and merging across triplet chains"""
@@ -479,6 +520,430 @@ def collect_node_descriptions_with_context(chain: List[Dict[str, Any]]) -> NodeD
     return dedup_manager
 
 
+# Create page categorization chain
+def create_page_categorization_chain():
+    """Create LCEL chain for analyzing page descriptions and determining categories
+    
+    Returns:
+        Page categorization chain
+    """
+    categorization_prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are an AI assistant specialized in analyzing mobile app page descriptions and categorizing them into meaningful page types.
+
+Your task is to analyze page descriptions and determine what category of page this represents based on its functionality and UI elements.
+
+Analyze the page content and determine the most appropriate category."""),
+        
+        ("human", """Please analyze this page description and categorize it:
+
+Page Description: {page_description}
+
+Context Information:
+- Task: {task_info}
+- Elements on page: {page_elements}
+
+Please provide your analysis in the following JSON format:
+
+{{
+  "category_name": "The most appropriate category name for this page",
+  "category_description": "A brief description of what this page category represents",
+  "confidence_score": 0.85,
+  "key_elements": ["list", "of", "key", "UI", "elements"]
+}}
+
+Make sure to return ONLY valid JSON with these exact field names.""")
+    ])
+    
+    # Build LCEL chain with JSON output
+    categorization_chain = (
+        RunnablePassthrough() 
+        | categorization_prompt 
+        | model 
+        | JsonOutputParser()
+    )
+    
+    return categorization_chain
+
+
+# Analyze pages and group them by category
+async def categorize_pages_in_chain(chain: List[Dict[str, Any]], task_info: str = "Unknown Task") -> PageCategoryManager:
+    """Analyze all pages in a chain and group them by category
+    
+    Args:
+        chain: Triplet chain containing pages to categorize
+        task_info: Task information for context
+        
+    Returns:
+        PageCategoryManager with categorized pages
+    """
+    print("🏷️  Categorizing pages by functionality...")
+    
+    category_manager = PageCategoryManager()
+    categorization_chain = create_page_categorization_chain()
+    
+    # Collect all unique pages
+    unique_pages = {}
+    for triplet_idx, triplet in enumerate(chain):
+        print(f"   📋 Triplet {triplet_idx}: {triplet.get('source_page', {}).get('page_id', 'None')[:8]} → {triplet.get('target_page', {}).get('page_id', 'None')[:8]}")
+        for page_key in ['source_page', 'target_page']:
+            if page_key in triplet and 'page_id' in triplet[page_key]:
+                page_id = triplet[page_key]['page_id']
+                if page_id not in unique_pages:
+                    unique_pages[page_id] = triplet[page_key]
+                    print(f"      Added unique page: {page_id[:8]} (from {page_key})")
+                else:
+                    print(f"      Already seen page: {page_id[:8]} (from {page_key})")
+    
+    print(f"\n   Found {len(unique_pages)} unique pages to categorize")
+    print(f"   Page IDs: {[pid[:8] for pid in unique_pages.keys()]}")
+    
+    # Categorize each page
+    for page_idx, (page_id, page_data) in enumerate(unique_pages.items(), 1):
+        try:
+            print(f"\n   🔍 Processing page {page_idx}/{len(unique_pages)}: {page_id[:8]}...")
+            page_description = page_data.get('description', '')
+            print(f"      Description length: {len(page_description)} chars")
+            
+            # Extract elements information for categorization
+            page_elements = "No element information available"
+            element_descriptions = []
+            
+            if 'elements' in page_data:
+                try:
+                    elements_data = json.loads(page_data['elements']) if isinstance(page_data['elements'], str) else page_data['elements']
+                    if isinstance(elements_data, list) and elements_data:
+                        element_types = [elem.get('type', 'unknown') for elem in elements_data[:15]]  # First 15 elements
+                        element_texts = [elem.get('text', '') for elem in elements_data[:10] if elem.get('text', '').strip()]
+                        page_elements = f"UI elements: {', '.join(set(element_types))}"
+                        if element_texts:
+                            element_descriptions = element_texts[:5]  # Top 5 text elements
+                        print(f"      Found {len(elements_data)} elements, {len(element_texts)} with text")
+                        print(f"      Element types: {set(element_types)}")
+                        print(f"      Sample texts: {element_descriptions[:2]}")
+                except Exception as e:
+                    print(f"   ⚠️  Error parsing elements for page {page_id}: {str(e)}")
+            else:
+                print(f"      No 'elements' key in page_data")
+            
+            # If no description, try to create one from UI elements and raw_page_url
+            if not page_description.strip():
+                description_parts = []
+                
+                # Add element-based description
+                if element_descriptions:
+                    description_parts.append(f"Page with UI elements containing: {', '.join(element_descriptions[:3])}")
+                elif 'UI elements:' in page_elements:
+                    description_parts.append(f"Page containing {page_elements.lower()}")
+                
+                # Add URL-based context if available
+                raw_url = page_data.get('raw_page_url', '')
+                if raw_url and 'step' in raw_url:
+                    description_parts.append(f"Screenshot from navigation step")
+                
+                if description_parts:
+                    page_description = ". ".join(description_parts) + "."
+                    print(f"   🔧 Generated fallback description for page {page_id[:8]}...")
+                    print(f"      Generated: {page_description[:100]}...")
+                else:
+                    print(f"   ⚠️  Skipping page {page_id} - no description or usable element data")
+                    continue
+            else:
+                print(f"      Using existing description: {page_description[:100]}...")
+            
+            # Analyze page category
+            category_input = {
+                "page_description": page_description,
+                "task_info": task_info,
+                "page_elements": page_elements
+            }
+            
+            print(f"      🤖 Sending to LLM for categorization...")
+            print(f"      Input description: {page_description[:150]}...")
+            print(f"      Input elements: {page_elements[:100]}...")
+            
+            category_result_dict = await categorization_chain.ainvoke(category_input)
+            
+            print(f"      🤖 LLM Response: {category_result_dict}")
+            
+            # Convert dictionary to PageCategoryResult object
+            try:
+                category_result = PageCategoryResult(**category_result_dict)
+            except Exception as e:
+                print(f"   ❌ Error parsing category result for page {page_id}: {str(e)}")
+                print(f"   Raw result: {category_result_dict}")
+                continue
+            
+            if category_result.confidence_score >= 0.6:  # Only use high-confidence categorizations
+                print(f"   📋 Page {page_id[:8]}... → {category_result.category_name} (confidence: {category_result.confidence_score:.2f})")
+                
+                category_manager.add_page_to_category(
+                    page_id=page_id,
+                    category_name=category_result.category_name,
+                    description=page_description,
+                    metadata={
+                        'confidence': category_result.confidence_score,
+                        'category_description': category_result.category_description,
+                        'key_elements': category_result.key_elements,
+                        'original_page_data': page_data
+                    }
+                )
+            else:
+                print(f"   ⚠️  Page {page_id[:8]}... - low confidence categorization ({category_result.confidence_score:.2f}), skipping")
+                
+        except Exception as e:
+            print(f"   ❌ Error categorizing page {page_id}: {str(e)}")
+    
+    return category_manager
+
+
+# Perform category-based page merging with physical deletion
+async def merge_pages_by_category(
+    category_manager: PageCategoryManager, 
+    enhanced_merge_chain,
+    task_info: str
+) -> Dict[str, Any]:
+    """Merge pages by category and physically delete duplicate page nodes
+    
+    Args:
+        category_manager: PageCategoryManager with categorized pages
+        enhanced_merge_chain: Enhanced merging chain for description consolidation
+        task_info: Task information for context
+        
+    Returns:
+        Dictionary with merge results and statistics
+    """
+    print("🗂️  Merging pages by category with physical deletion...")
+    
+    merge_results = {
+        "categories_processed": 0,
+        "pages_merged": 0,
+        "pages_deleted": 0,
+        "canonical_pages_created": 0,
+        "relationships_updated": 0,
+        "category_details": []
+    }
+    
+    categories_for_merging = category_manager.get_categories_for_merging()
+    
+    if not categories_for_merging:
+        print("   No categories with multiple pages found for merging")
+        return merge_results
+    
+    print(f"   Found {len(categories_for_merging)} categories with multiple pages")
+    
+    try:
+        with db.driver.session(database="neo4j") as session:
+            for category_name, page_ids in categories_for_merging:
+                print(f"\n🏷️  Processing category: {category_name} ({len(page_ids)} pages)")
+                
+                # Collect all page descriptions for this category
+                page_descriptions = []
+                page_metadata = []
+                
+                for page_id in page_ids:
+                    # Get page data from database
+                    page_query = """
+                    MATCH (p:Page)
+                    WHERE p.page_id = $page_id
+                    RETURN p
+                    """
+                    page_result = session.run(page_query, page_id=page_id)
+                    page_record = page_result.single()
+                    
+                    if page_record:
+                        page_node = dict(page_record["p"])
+                        page_descriptions.append(page_node.get('description', ''))
+                        page_metadata.append({
+                            'page_id': page_id,
+                            'timestamp': page_node.get('timestamp'),
+                            'raw_page_url': page_node.get('raw_page_url'),
+                            'other_info': page_node.get('other_info'),
+                            'elements': page_node.get('elements')
+                        })
+                
+                if not page_descriptions:
+                    print(f"   ⚠️  No page data found for category {category_name}")
+                    continue
+                
+                # Create enhanced merge input for category consolidation
+                descriptions_with_context = ""
+                for i, desc in enumerate(page_descriptions, 1):
+                    descriptions_with_context += f"\n--- Description {i} (from {page_metadata[i-1]['page_id'][:8]}...) ---\n{desc}\n"
+                
+                # Use enhanced merging to create category description
+                merge_input = {
+                    "descriptions_with_context": descriptions_with_context,
+                    "task_info": task_info,
+                    "node_type": "Page Category",
+                    "merge_context": f"Merging {len(page_ids)} pages into {category_name} category"
+                }
+                
+                try:
+                    merge_result = await enhanced_merge_chain.ainvoke(merge_input)
+                    category_description = merge_result.merged_description
+                    
+                    print(f"   ✅ Generated category description: {category_description[:100]}...")
+                    
+                except Exception as e:
+                    print(f"   ⚠️  Failed to merge descriptions for {category_name}, using fallback: {str(e)}")
+                    category_description = f"Category: {category_name}. " + " | ".join([desc[:50] for desc in page_descriptions if desc.strip()])
+                
+                # Select canonical page (first one chronologically or first in list)
+                canonical_page_id = page_ids[0]
+                canonical_page_metadata = page_metadata[0]
+                duplicate_page_ids = page_ids[1:]
+                
+                print(f"   📌 Using {canonical_page_id[:8]}... as canonical page")
+                print(f"   🗑️  Will delete {len(duplicate_page_ids)} duplicate pages")
+                
+                # Update canonical page with category information
+                update_canonical_query = """
+                MATCH (canonical:Page)
+                WHERE canonical.page_id = $canonical_page_id
+                SET canonical.description = $category_description,
+                    canonical.name = $category_name,
+                    canonical.title = $category_name,
+                    canonical.is_category_representative = true,
+                    canonical.category_name = $category_name,
+                    canonical.category_merge_timestamp = datetime(),
+                    canonical.merged_page_count = $merged_page_count,
+                    canonical.merged_from_pages = $merged_from_pages,
+                    canonical.category_confidence = $category_confidence
+                RETURN canonical
+                """
+                
+                # Get category metadata
+                category_meta = category_manager.category_metadata.get(category_name, {})
+                
+                session.run(update_canonical_query,
+                           canonical_page_id=canonical_page_id,
+                           category_description=category_description,
+                           category_name=category_name,
+                           merged_page_count=len(page_ids),
+                           merged_from_pages=json.dumps(page_ids),
+                           category_confidence=category_meta.get('confidence', 0.8))
+                
+                # Redirect all relationships from duplicate pages to canonical page
+                relationships_updated = 0
+                
+                for dup_page_id in duplicate_page_ids:
+                    # Redirect incoming relationships (avoiding duplicates)
+                    redirect_incoming_query = """
+                    MATCH (source)-[r]->(duplicate:Page)
+                    WHERE duplicate.page_id = $dup_page_id
+                    MATCH (canonical:Page)
+                    WHERE canonical.page_id = $canonical_page_id
+                    // Only create relationship if it doesn't exist
+                    MERGE (source)-[new_r:NAVIGATES_TO]->(canonical)
+                    ON CREATE SET new_r = properties(r), 
+                                  new_r.redirected_from = $dup_page_id,
+                                  new_r.category_merged = true,
+                                  new_r.created_by_merge = true
+                    ON MATCH SET new_r.also_redirected_from = CASE 
+                                    WHEN new_r.also_redirected_from IS NULL THEN [$dup_page_id]
+                                    ELSE new_r.also_redirected_from + $dup_page_id
+                                 END
+                    DELETE r
+                    RETURN count(r) as redirected_count
+                    """
+                    
+                    result = session.run(redirect_incoming_query, 
+                                       dup_page_id=dup_page_id, 
+                                       canonical_page_id=canonical_page_id)
+                    count_record = result.single()
+                    if count_record:
+                        relationships_updated += count_record["redirected_count"]
+                    
+                    # Redirect outgoing relationships (avoiding duplicates)
+                    redirect_outgoing_query = """
+                    MATCH (duplicate:Page)-[r]->(target)
+                    WHERE duplicate.page_id = $dup_page_id
+                    MATCH (canonical:Page)
+                    WHERE canonical.page_id = $canonical_page_id
+                    // Only create relationship if it doesn't exist
+                    MERGE (canonical)-[new_r:NAVIGATES_TO]->(target)
+                    ON CREATE SET new_r = properties(r), 
+                                  new_r.redirected_from = $dup_page_id,
+                                  new_r.category_merged = true,
+                                  new_r.created_by_merge = true
+                    ON MATCH SET new_r.also_redirected_from = CASE 
+                                    WHEN new_r.also_redirected_from IS NULL THEN [$dup_page_id]
+                                    ELSE new_r.also_redirected_from + $dup_page_id
+                                 END
+                    DELETE r
+                    RETURN count(r) as redirected_count
+                    """
+                    
+                    result = session.run(redirect_outgoing_query, 
+                                       dup_page_id=dup_page_id, 
+                                       canonical_page_id=canonical_page_id)
+                    count_record = result.single()
+                    if count_record:
+                        relationships_updated += count_record["redirected_count"]
+                
+                # Physically delete duplicate page nodes
+                pages_deleted = 0
+                for dup_page_id in duplicate_page_ids:
+                    delete_query = """
+                    MATCH (duplicate:Page)
+                    WHERE duplicate.page_id = $dup_page_id
+                    DELETE duplicate
+                    RETURN count(duplicate) as deleted_count
+                    """
+                    
+                    result = session.run(delete_query, dup_page_id=dup_page_id)
+                    count_record = result.single()
+                    if count_record:
+                        pages_deleted += count_record["deleted_count"]
+                
+                # Update results
+                merge_results["categories_processed"] += 1
+                merge_results["pages_merged"] += len(page_ids)
+                merge_results["pages_deleted"] += pages_deleted
+                merge_results["canonical_pages_created"] += 1
+                merge_results["relationships_updated"] += relationships_updated
+                
+                merge_results["category_details"].append({
+                    "category_name": category_name,
+                    "total_pages": len(page_ids),
+                    "pages_deleted": pages_deleted,
+                    "relationships_updated": relationships_updated,
+                    "canonical_page_id": canonical_page_id,
+                    "merged_description_length": len(category_description)
+                })
+                
+                # Clean up any remaining duplicate relationships
+                cleanup_query = """
+                MATCH (a)-[r1:NAVIGATES_TO]->(b), (a)-[r2:NAVIGATES_TO]->(b)
+                WHERE id(r1) < id(r2) AND r1.category_merged = true AND r2.category_merged = true
+                DELETE r2
+                RETURN count(r2) as duplicates_removed
+                """
+                
+                cleanup_result = session.run(cleanup_query)
+                cleanup_record = cleanup_result.single()
+                duplicates_removed = cleanup_record["duplicates_removed"] if cleanup_record else 0
+                
+                if duplicates_removed > 0:
+                    print(f"   🧹 Cleaned up {duplicates_removed} duplicate relationships")
+                
+                print(f"   ✅ Category {category_name}: merged {len(page_ids)} pages, deleted {pages_deleted}, updated {relationships_updated} relationships")
+                
+    except Exception as e:
+        print(f"❌ Error during category-based merging: {str(e)}")
+    
+    # Summary
+    efficiency = (merge_results["pages_deleted"] / max(merge_results["pages_merged"], 1)) * 100
+    print(f"\n✅ Category-based merging completed:")
+    print(f"   📊 {merge_results['categories_processed']} categories processed")
+    print(f"   🗂️  {merge_results['pages_merged']} total pages involved")
+    print(f"   🗑️  {merge_results['pages_deleted']} pages physically deleted")
+    print(f"   📈 {efficiency:.1f}% deletion efficiency")
+    print(f"   🔗 {merge_results['relationships_updated']} relationships updated")
+    
+    return merge_results
+
+
 # Enhanced function for merging descriptions using context-aware consolidation
 async def enhanced_merge_node_descriptions(
     dedup_manager: NodeDeduplicationManager,
@@ -690,22 +1155,19 @@ def identify_physical_duplicate_nodes(chain: List[Dict[str, Any]]) -> NodeDedupl
                 print(f"   📄 WILL DELETE duplicate page: {duplicate_id} (keeping {canonical_id})")
                 print(f"      Reason: Elements size {record.get('elements1_size', 0)} vs {record.get('elements2_size', 0)}")
             
-            # Find elements with similar descriptions or properties
+            # Find elements with similar descriptions
             element_similarity_query = """
             MATCH (e1:Element), (e2:Element)
             WHERE e1.element_id < e2.element_id
             AND (
                 e1.description = e2.description OR
-                (e1.element_type = e2.element_type AND 
-                 e1.description IS NOT NULL AND e2.description IS NOT NULL AND
+                (e1.description IS NOT NULL AND e2.description IS NOT NULL AND
                  e1.description CONTAINS e2.description) OR
-                (e1.element_type = e2.element_type AND 
-                 e2.description IS NOT NULL AND e1.description IS NOT NULL AND
+                (e2.description IS NOT NULL AND e1.description IS NOT NULL AND
                  e2.description CONTAINS e1.description)
             )
             RETURN e1.element_id as elem1, e2.element_id as elem2,
-                   e1.description as desc1, e2.description as desc2,
-                   e1.element_type as type1, e2.element_type as type2
+                   e1.description as desc1, e2.description as desc2
             """
             
             element_duplicates = session.run(element_similarity_query)
@@ -833,8 +1295,10 @@ def deep_merge_and_deduplicate_nodes(merged_descriptions: Dict[str, str], dedup_
                     WHERE duplicate.{id_field} = $dup_id
                     MATCH (canonical:{node_type})
                     WHERE canonical.{id_field} = $canonical_id
-                    CREATE (source)-[new_r:{{type(r)}}]->(canonical)
+                    CREATE (source)-[new_r:NAVIGATES_TO]->(canonical)
                     SET new_r = properties(r)
+                    SET new_r.redirected_from = $dup_id
+                    SET new_r.merged_relationship = true
                     DELETE r
                     RETURN count(new_r) as redirected
                     """
@@ -852,8 +1316,10 @@ def deep_merge_and_deduplicate_nodes(merged_descriptions: Dict[str, str], dedup_
                     WHERE duplicate.{id_field} = $dup_id
                     MATCH (canonical:{node_type})
                     WHERE canonical.{id_field} = $canonical_id
-                    CREATE (canonical)-[new_r:{{type(r)}}]->(target)
+                    CREATE (canonical)-[new_r:NAVIGATES_TO]->(target)
                     SET new_r = properties(r)
+                    SET new_r.redirected_from = $dup_id
+                    SET new_r.merged_relationship = true
                     DELETE r
                     RETURN count(new_r) as redirected
                     """
@@ -1237,11 +1703,16 @@ async def process_single_chain(
 
 
 # Process complete chain and update database
-async def process_and_update_chain(start_page_id: str) -> List[Dict[str, Any]]:
+async def process_and_update_chain(
+    start_page_id: str, 
+    use_category_merging: bool = False
+) -> List[Dict[str, Any]]:
     """Process triplet chain and update database using enhanced node merging strategy
 
     Args:
         start_page_id: Starting page ID
+        use_category_merging: If True, applies category-based page merging with physical deletion
+                             instead of just logical merging
 
     Returns:
         List of processed triplets with comprehensive deduplication
@@ -1263,10 +1734,57 @@ async def process_and_update_chain(start_page_id: str) -> List[Dict[str, Any]]:
 
     print(f"📋 Retrieved {len(triplets)} triplets from database")
 
-    # Process with enhanced strategy
-    processed_chain = await process_single_chain(triplets, reasoning_chain, merge_chain)
+    if use_category_merging:
+        print(f"🏷️  Using category-based page merging with physical deletion")
+        
+        # Extract task information for categorization
+        task_info = "Unknown Task"
+        if (
+            triplets
+            and triplets[0]
+            and "source_page" in triplets[0]
+            and "other_info" in triplets[0]["source_page"]
+        ):
+            try:
+                other_info = triplets[0]["source_page"]["other_info"]
+                if isinstance(other_info, str):
+                    other_info = json.loads(other_info)
 
-    print(f"✅ Enhanced chain processing completed successfully")
+                if "task_info" in other_info and "description" in other_info["task_info"]:
+                    task_info = other_info["task_info"]["description"]
+                    print(f"📋 Extracted task information: {task_info}")
+            except Exception as e:
+                print(f"⚠️ Error extracting task information: {str(e)}")
+        
+        # First, process triplets to generate descriptions if they don't exist
+        print(f"🔍 Pre-processing triplets to generate descriptions...")
+        reasoning_chain = create_triplet_reasoning_chain()
+        processed_triplets = []
+        for i, triplet in enumerate(triplets):
+            print(f"   Processing triplet {i+1}/{len(triplets)} for description generation")
+            processed_triplet = await process_triplet(triplet, reasoning_chain)
+            processed_triplets.append(processed_triplet)
+        
+        # Apply category-based page merging to the processed triplets
+        processed_chain, category_report = await apply_category_based_page_merging(
+            chain=processed_triplets,
+            task_info=task_info
+        )
+        
+        # Add category report to first triplet for UI display
+        if processed_chain:
+            processed_chain[0]['category_merge_report'] = category_report
+            
+        print(f"✅ Category-based chain processing completed successfully")
+        print(f"   🗑️  {category_report['summary']['pages_physically_deleted']} pages physically deleted")
+        print(f"   📈 {category_report['summary']['deletion_efficiency']:.1f}% deletion efficiency")
+        
+    else:
+        print(f"🔧 Using standard enhanced merging (logical only)")
+        # Process with enhanced strategy (logical merging only)
+        processed_chain = await process_single_chain(triplets, reasoning_chain, merge_chain)
+        print(f"✅ Enhanced chain processing completed successfully")
+
     return processed_chain
 
 
@@ -1386,6 +1904,113 @@ async def apply_deep_node_deduplication(
     print(f"   - Logical merging: {deduplication_report['summary']['logical_merge_efficiency']:.2%}")
     
     return updated_chain, deduplication_report
+
+
+# Main API for category-based page deduplication and merging
+async def apply_category_based_page_merging(
+    chain: List[Dict[str, Any]], 
+    task_info: str = "Unknown Task"
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Apply category-based page deduplication that groups similar pages and physically deletes duplicates
+    
+    This function analyzes pages in the chain, categorizes them by functionality (e.g., 'Home Page', 
+    'Product Listing', 'Product Detail'), merges pages in the same category, and physically deletes 
+    duplicate page nodes while maintaining one representative per category.
+    
+    Perfect for scenarios like e-commerce apps where you visit home→listing→product→listing→product→home
+    but only want 3 category nodes: Home, Product Listing, Product Detail.
+    
+    Args:
+        chain: List of triplet dictionaries containing page navigation data
+        task_info: Task context information for better categorization
+        
+    Returns:
+        Tuple of (updated_chain, category_merge_report)
+    """
+    print(f"🏷️  Applying category-based page merging to chain of {len(chain)} triplets")
+    
+    # Step 1: Categorize all pages by functionality
+    category_manager = await categorize_pages_in_chain(chain, task_info)
+    
+    # Step 2: Create enhanced merging chain for description consolidation
+    enhanced_merge_chain = create_enhanced_node_merge_chain()
+    
+    # Step 3: Merge pages within each category and physically delete duplicates
+    category_merge_results = await merge_pages_by_category(
+        category_manager, enhanced_merge_chain, task_info
+    )
+    
+    # Step 4: Update chain to reference canonical pages only
+    updated_chain = []
+    page_id_mappings = {}  # Maps original_page_id -> canonical_page_id
+    
+    # Build mapping from category manager
+    for category_name, page_ids in category_manager.page_categories.items():
+        if len(page_ids) > 1:
+            canonical_page_id = page_ids[0]  # First page becomes canonical
+            for page_id in page_ids:
+                page_id_mappings[page_id] = canonical_page_id
+    
+    # Update triplets to reference canonical pages
+    for triplet in chain:
+        updated_triplet = triplet.copy()
+        
+        # Update source page reference
+        if 'source_page' in updated_triplet and 'page_id' in updated_triplet['source_page']:
+            original_id = updated_triplet['source_page']['page_id']
+            if original_id in page_id_mappings:
+                updated_triplet['source_page']['page_id'] = page_id_mappings[original_id]
+                # Add metadata about the category merge
+                updated_triplet['source_page']['is_category_merged'] = True
+                updated_triplet['source_page']['original_page_id'] = original_id
+        
+        # Update target page reference
+        if 'target_page' in updated_triplet and 'page_id' in updated_triplet['target_page']:
+            original_id = updated_triplet['target_page']['page_id']
+            if original_id in page_id_mappings:
+                updated_triplet['target_page']['page_id'] = page_id_mappings[original_id]
+                # Add metadata about the category merge
+                updated_triplet['target_page']['is_category_merged'] = True
+                updated_triplet['target_page']['original_page_id'] = original_id
+        
+        updated_chain.append(updated_triplet)
+    
+    # Step 5: Create comprehensive report
+    category_merge_report = {
+        "summary": {
+            "total_pages_analyzed": len(set(
+                [t['source_page']['page_id'] for t in chain if 'source_page' in t and 'page_id' in t['source_page']] +
+                [t['target_page']['page_id'] for t in chain if 'target_page' in t and 'page_id' in t['target_page']]
+            )),
+            "categories_identified": len(category_manager.get_all_categories()),
+            "categories_merged": category_merge_results["categories_processed"],
+            "pages_physically_deleted": category_merge_results["pages_deleted"],
+            "canonical_pages_remaining": category_merge_results["canonical_pages_created"],
+            "relationships_updated": category_merge_results["relationships_updated"],
+            "deletion_efficiency": (category_merge_results["pages_deleted"] / max(category_merge_results["pages_merged"], 1)) * 100
+        },
+        "category_details": category_merge_results["category_details"],
+        "page_mappings": page_id_mappings,
+        "categories": {
+            category: {
+                "page_count": len(pages),
+                "canonical_page": pages[0] if pages else None,
+                "metadata": category_manager.category_metadata.get(category, {})
+            }
+            for category, pages in category_manager.page_categories.items()
+        }
+    }
+    
+    # Log summary
+    print(f"\n✅ Category-based page merging completed:")
+    print(f"   📊 {category_merge_report['summary']['total_pages_analyzed']} total pages analyzed")
+    print(f"   🏷️  {category_merge_report['summary']['categories_identified']} categories identified")
+    print(f"   🗂️  {category_merge_report['summary']['categories_merged']} categories with multiple pages merged")
+    print(f"   🗑️  {category_merge_report['summary']['pages_physically_deleted']} pages physically deleted")
+    print(f"   📈 {category_merge_report['summary']['deletion_efficiency']:.1f}% deletion efficiency")
+    print(f"   🔗 {category_merge_report['summary']['relationships_updated']} relationships updated")
+    
+    return updated_chain, category_merge_report
 
 
 # Direct API for enhanced node merging (standalone function)
